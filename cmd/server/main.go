@@ -1,1 +1,1 @@
-package distributedkvstore
+package main
