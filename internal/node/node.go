@@ -1,28 +1,47 @@
 package node
 
-import "github.com/SK3720/Distributed-KV-Store/internal/kv"
+import (
+	"math/rand"
+	"time"
+
+	"github.com/SK3720/Distributed-KV-Store/internal/kv"
+)
+
+type NodeState string
+
+const (
+	Follower  NodeState = "follower"
+	Candidate NodeState = "candidate"
+	Leader    NodeState = "leader"
+)
 
 type Node struct {
 	ID      string
 	Address string
 	Store   *kv.Store
 	running bool
-	// Here, we store the pointer to the Store struct since the constructor of the Store struct returns a pointer to the Store struct.
-	// This is also a convention of Struct composition in Go, where we embed a pointer to another struct within a struct to achieve composition and reuse of functionality.
+
+	// Raft state
+	currentTerm int
+	votedFor    string
+	state       NodeState
+
+	// Election timing
+	electionTimeout time.Duration
+	lastHeartbeat   time.Time
+
+	// Other nodes in the cluster
+	Peers []string
 }
 
 func NewNode(id string, address string) *Node {
 	return &Node{
-		ID:      id,
-		Address: address,
-		Store:   kv.NewStore(),
+		ID:              id,
+		Address:         address,
+		Store:           kv.NewStore(),
+		running:         false,
+		state:           Follower,
+		electionTimeout: time.Duration(1000+rand.Intn(1000)) * time.Millisecond,
+		lastHeartbeat:   time.Now(),
 	}
-}
-
-func (n *Node) Start() {
-	n.running = true
-}
-
-func (n *Node) Stop() {
-	n.running = false
 }
