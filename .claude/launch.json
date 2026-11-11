@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "visualizer",
+      "runtimeExecutable": "go",
+      "runtimeArgs": ["run", "./cmd/visualizer"],
+      "port": 8080
+    }
+  ]
+}

@@ -8,17 +8,27 @@ import (
 )
 
 func TestRPCClient(t *testing.T) {
-	server := node.NewNode("node1", "localhost:9001")
+	server := newTestNode(t, "node1", "localhost:9020", nil, "")
 
-	go server.StartRPC()
+	err := server.Start()
+	if err != nil {
+		t.Fatalf("failed to start node: %v", err)
+	}
 
-	// Give the server a moment to start.
-	time.Sleep(100 * time.Millisecond)
+	// Writes now go through Raft, so wait for the single node to elect itself leader.
+	waitForLeader(t, []*node.Node{server}, 5*time.Second)
 
-	client := node.NewClient("localhost:9001")
+	client := node.NewClient("localhost:9020")
+
+	// The leader can't answer reads until its first (NOOP) entry is committed,
+	// so the first GET may briefly fail. Wait until reads are ready.
+	waitFor(t, 2*time.Second, "leader ready for reads", func() bool {
+		_, _, err := client.Get("anything")
+		return err == nil
+	})
 
 	// PUT
-	err := client.Put("name", "Shiv")
+	err = client.Put("name", "Shiv")
 	if err != nil {
 		t.Fatalf("PUT failed: %v", err)
 	}

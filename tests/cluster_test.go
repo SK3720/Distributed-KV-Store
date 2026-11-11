@@ -11,81 +11,58 @@ import (
 func TestThreeNodeCluster(t *testing.T) {
 	fmt.Println("\n=== 3-Node KV Store Cluster ===")
 
-	node1 := node.NewNode("node1", "localhost:9001")
-	node2 := node.NewNode("node2", "localhost:9002")
-	node3 := node.NewNode("node3", "localhost:9003")
-
 	fmt.Println("Starting Node 1 on localhost:9001")
 	fmt.Println("Starting Node 2 on localhost:9002")
 	fmt.Println("Starting Node 3 on localhost:9003")
 
-	go node1.StartRPC()
-	go node2.StartRPC()
-	go node3.StartRPC()
+	nodes := startCluster(t, 9001, 3, "")
 
-	time.Sleep(100 * time.Millisecond)
+	leader := waitForLeader(t, nodes, 5*time.Second)
+	fmt.Printf("Leader elected → %s\n", leader.ID)
 
-	// Create clients for each node.
-	client1 := node.NewClient("localhost:9001")
-	client2 := node.NewClient("localhost:9002")
-	client3 := node.NewClient("localhost:9003")
+	// The cluster client finds the leader on its own.
+	client := node.NewClusterClient(addressesOf(nodes))
 
 	fmt.Println("\n--- PUT ---")
-	fmt.Println("Node 1 ← PUT name = Shiv")
+	fmt.Println("Cluster ← PUT name = Shiv")
 
-	err := client1.Put("name", "Shiv")
+	err := client.Put("name", "Shiv")
 	if err != nil {
-		t.Fatalf("Node 1 PUT failed: %v", err)
+		t.Fatalf("PUT failed: %v", err)
 	}
 
-	fmt.Println("✓ PUT successful")
+	fmt.Println("✓ PUT committed by a majority")
 
 	fmt.Println("\n--- GET ---")
-	value, found, err := client1.Get("name")
+	value, found, err := client.Get("name")
 	if err != nil {
-		t.Fatalf("Node 1 GET failed: %v", err)
+		t.Fatalf("GET failed: %v", err)
 	}
 
-	fmt.Printf("Node 1 → GET name = %q\n", value)
+	fmt.Printf("Leader → GET name = %q\n", value)
 
 	if !found || value != "Shiv" {
-		t.Fatalf("Node 1 returned unexpected value: %s", value)
+		t.Fatalf("leader returned unexpected value: %s", value)
 	}
 
-	fmt.Println("✓ Node 1 has the value")
+	fmt.Println("\n--- Checking Every Node's Store ---")
 
-	fmt.Println("\n--- Checking Other Nodes ---")
+	for _, n := range nodes {
+		waitFor(t, 2*time.Second, n.ID+" has name = Shiv", func() bool {
+			return hasValue(n, "name", "Shiv")
+		})
 
-	_, found, err = client2.Get("name")
-	if err != nil {
-		t.Fatalf("Node 2 GET failed: %v", err)
+		fmt.Printf("%s → name = \"Shiv\"\n", n.ID)
 	}
-
-	if found {
-		t.Fatal("Node 2 should not have the value yet")
-	}
-
-	fmt.Println("Node 2 → GET name = <not found>")
-
-	_, found, err = client3.Get("name")
-	if err != nil {
-		t.Fatalf("Node 3 GET failed: %v", err)
-	}
-
-	if found {
-		t.Fatal("Node 3 should not have the value yet")
-	}
-
-	fmt.Println("Node 3 → GET name = <not found>")
 
 	fmt.Println("\n✓ All three nodes are running")
-	fmt.Println("✓ KV stores are currently independent")
+	fmt.Println("✓ KV stores are replicated through Raft")
 }
 
 func TestRaftElectionTimeout(t *testing.T) {
 	fmt.Println("\n=== Raft Single-Node Election ===")
 
-	server := node.NewNode("node1", "localhost:9010")
+	server := newTestNode(t, "node1", "localhost:9010", nil, "")
 
 	fmt.Println("Starting Node 1...")
 	go server.StartRaft()
@@ -107,25 +84,10 @@ func TestRaftElectionTimeout(t *testing.T) {
 func TestThreeNodeLeaderElection(t *testing.T) {
 	fmt.Println("\n=== 3-Node Raft Leader Election ===")
 
-	node1 := node.NewNode("node1", "localhost:9101")
-	node2 := node.NewNode("node2", "localhost:9102")
-	node3 := node.NewNode("node3", "localhost:9103")
-
 	// Configure each node's peers.
-	node1.Peers = []string{
-		"localhost:9102",
-		"localhost:9103",
-	}
-
-	node2.Peers = []string{
-		"localhost:9101",
-		"localhost:9103",
-	}
-
-	node3.Peers = []string{
-		"localhost:9101",
-		"localhost:9102",
-	}
+	node1 := newTestNode(t, "node1", "localhost:9101", []string{"localhost:9102", "localhost:9103"}, "")
+	node2 := newTestNode(t, "node2", "localhost:9102", []string{"localhost:9101", "localhost:9103"}, "")
+	node3 := newTestNode(t, "node3", "localhost:9103", []string{"localhost:9101", "localhost:9102"}, "")
 
 	fmt.Println("Cluster configuration:")
 	fmt.Println("  Node 1 → localhost:9101")

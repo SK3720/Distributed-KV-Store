@@ -3,6 +3,19 @@ package node
 import (
 	"encoding/json"
 	"net"
+	"time"
+)
+
+// Network timeouts.
+const (
+	// How long to wait when connecting to a node.
+	dialTimeout = 200 * time.Millisecond
+
+	// Raft RPCs should be fast. If a peer takes longer than this, treat it as unreachable.
+	raftRPCTimeout = 500 * time.Millisecond
+
+	// Client requests can wait for a commit, so they get longer.
+	clientRequestTimeout = commitTimeout + 2*time.Second
 )
 
 // Client communicates with a node over TCP.
@@ -17,176 +30,129 @@ func NewClient(address string) *Client {
 	}
 }
 
-// Get retrieves a value from the node.
-func (c *Client) Get(key string) (string, bool, error) {
-	conn, err := net.Dial("tcp", c.Address)
+// call sends one request to the node and waits for its response.
+// Every operation below uses this, so the connection handling lives in one place.
+func (c *Client) call(request Request, timeout time.Duration) (Response, error) {
+	var response Response
+
+	conn, err := net.DialTimeout("tcp", c.Address, dialTimeout)
 	if err != nil {
-		return "", false, err
+		return response, err
 	}
 	defer conn.Close()
 
+	conn.SetDeadline(time.Now().Add(timeout))
+	// If the node doesn't answer in time, the read below fails instead of hanging forever.
+
+	err = json.NewEncoder(conn).Encode(request)
+	if err != nil {
+		return response, err
+	}
+
+	err = json.NewDecoder(conn).Decode(&response)
+	if err != nil {
+		return response, err
+	}
+
+	return response, nil
+}
+
+// Get retrieves a value from the node.
+// If the node isn't the leader, the error is a *NotLeaderError.
+func (c *Client) Get(key string) (string, bool, error) {
 	request := Request{
 		Operation: "GET",
 		Key:       key,
 	}
 
-	requestData, err := json.Marshal(request)
+	response, err := c.call(request, clientRequestTimeout)
 	if err != nil {
 		return "", false, err
 	}
 
-	_, err = conn.Write(requestData)
+	err = response.toError()
 	if err != nil {
 		return "", false, err
-	}
-
-	buffer := make([]byte, 1024)
-
-	bytesRead, err := conn.Read(buffer)
-	if err != nil {
-		return "", false, err
-	}
-
-	var response Response
-
-	err = json.Unmarshal(buffer[:bytesRead], &response)
-	if err != nil {
-		return "", false, err
-	}
-
-	if response.Error != "" {
-		return "", false, nil
 	}
 
 	return response.Value, response.Found, nil
 }
 
 // Put stores a key-value pair on the node.
+// If the node isn't the leader, the error is a *NotLeaderError.
 func (c *Client) Put(key string, value string) error {
-	conn, err := net.Dial("tcp", c.Address)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
 	request := Request{
-		Operation: "PUT",
+		Operation: OpPut,
 		Key:       key,
 		Value:     value,
 	}
 
-	requestData, err := json.Marshal(request)
+	response, err := c.call(request, clientRequestTimeout)
 	if err != nil {
 		return err
 	}
 
-	_, err = conn.Write(requestData)
-	if err != nil {
-		return err
-	}
-
-	buffer := make([]byte, 1024)
-
-	bytesRead, err := conn.Read(buffer)
-	if err != nil {
-		return err
-	}
-
-	var response Response
-
-	err = json.Unmarshal(buffer[:bytesRead], &response)
-	if err != nil {
-		return err
-	}
-
-	if response.Error != "" {
-		return nil
-	}
-
-	return nil
+	return response.toError()
 }
 
 // Delete removes a key-value pair from the node.
+// If the node isn't the leader, the error is a *NotLeaderError.
 func (c *Client) Delete(key string) error {
-	conn, err := net.Dial("tcp", c.Address)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
 	request := Request{
-		Operation: "DELETE",
+		Operation: OpDelete,
 		Key:       key,
 	}
 
-	requestData, err := json.Marshal(request)
+	response, err := c.call(request, clientRequestTimeout)
 	if err != nil {
 		return err
 	}
 
-	_, err = conn.Write(requestData)
-	if err != nil {
-		return err
-	}
-
-	buffer := make([]byte, 1024)
-
-	bytesRead, err := conn.Read(buffer)
-	if err != nil {
-		return err
-	}
-
-	var response Response
-
-	err = json.Unmarshal(buffer[:bytesRead], &response)
-	if err != nil {
-		return err
-	}
-
-	if response.Error != "" {
-		return nil
-	}
-
-	return nil
+	return response.toError()
 }
 
 // RequestVote asks another node to vote for this candidate.
-func (c *Client) RequestVote(term int, candidateID string) (int, bool, error) {
-	conn, err := net.Dial("tcp", c.Address)
-	if err != nil {
-		return 0, false, err
-	}
-	defer conn.Close()
-
+func (c *Client) RequestVote(voteRequest RequestVoteRequest) (RequestVoteResponse, error) {
 	request := Request{
-		Operation:   "REQUEST_VOTE",
-		Term:        term,
-		CandidateID: candidateID,
+		Operation:    opRequestVote,
+		Term:         voteRequest.Term,
+		CandidateID:  voteRequest.CandidateID,
+		LastLogIndex: voteRequest.LastLogIndex,
+		LastLogTerm:  voteRequest.LastLogTerm,
 	}
 
-	requestData, err := json.Marshal(request)
+	response, err := c.call(request, raftRPCTimeout)
 	if err != nil {
-		return 0, false, err
+		return RequestVoteResponse{}, err
 	}
 
-	_, err = conn.Write(requestData)
+	return RequestVoteResponse{
+		Term:        response.Term,
+		VoteGranted: response.VoteGranted,
+	}, nil
+}
+
+// AppendEntries sends log entries (or a heartbeat) to a follower.
+func (c *Client) AppendEntries(appendRequest AppendEntriesRequest) (AppendEntriesResponse, error) {
+	request := Request{
+		Operation:     opAppendEntries,
+		Term:          appendRequest.Term,
+		LeaderID:      appendRequest.LeaderID,
+		LeaderAddress: appendRequest.LeaderAddress,
+		PrevLogIndex:  appendRequest.PrevLogIndex,
+		PrevLogTerm:   appendRequest.PrevLogTerm,
+		Entries:       appendRequest.Entries,
+		LeaderCommit:  appendRequest.LeaderCommit,
+	}
+
+	response, err := c.call(request, raftRPCTimeout)
 	if err != nil {
-		return 0, false, err
+		return AppendEntriesResponse{}, err
 	}
 
-	buffer := make([]byte, 1024)
-
-	bytesRead, err := conn.Read(buffer)
-	if err != nil {
-		return 0, false, err
-	}
-
-	var response Response
-
-	err = json.Unmarshal(buffer[:bytesRead], &response)
-	if err != nil {
-		return 0, false, err
-	}
-
-	return response.Term, response.VoteGranted, nil
+	return AppendEntriesResponse{
+		Term:          response.Term,
+		Success:       response.Success,
+		ConflictIndex: response.ConflictIndex,
+	}, nil
 }

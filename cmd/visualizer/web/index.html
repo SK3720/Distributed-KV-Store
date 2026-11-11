@@ -1,0 +1,816 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Raft KV Visualizer</title>
+<style>
+  :root {
+    --bg: #0e0f11;
+    --panel: #16171a;
+    --panel-2: #1d1e22;
+    --border: #2a2c31;
+    --text: #e7e8ea;
+    --muted: #8b8f97;
+    --dim: #4d5058;
+    --blue: #5b7cfa;
+    --blue-soft: rgba(91, 124, 250, 0.45);
+    --amber: #f5a524;
+    --green: #3ecf8e;
+    --red: #f2555a;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+
+  .app {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 360px;
+    gap: 18px;
+    padding: 18px;
+    max-width: 1450px;
+    margin: 0 auto;
+  }
+
+  @media (max-width: 1050px) {
+    .app { grid-template-columns: 1fr; }
+  }
+
+  .column { display: flex; flex-direction: column; gap: 18px; min-width: 0; }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px 18px;
+  }
+
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  h2 { font-size: 15px; font-weight: 600; margin: 0 0 4px; }
+  .explain { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  .subtitle { color: var(--muted); margin-top: 2px; }
+
+  /* Plain-English description of what's happening right now */
+  .narration {
+    margin-top: 14px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    background: var(--panel-2);
+    border-left: 3px solid var(--blue);
+    font-size: 15px;
+    min-height: 48px;
+    transition: border-color 0.3s;
+  }
+  .narration.warn { border-left-color: var(--amber); }
+  .narration.bad { border-left-color: var(--red); }
+  .narration.good { border-left-color: var(--green); }
+
+  #cluster { width: 100%; height: auto; display: block; max-height: 60vh; }
+
+  /* Links */
+  .edge .line { stroke: #292c33; stroke-width: 1.5; transition: stroke 0.2s; }
+  .edge.active .line { stroke: var(--blue-soft); }
+  .edge.cut .line { stroke: var(--red); stroke-dasharray: 6 6; opacity: 0.75; }
+  .edge .hit { stroke: transparent; stroke-width: 18; cursor: pointer; }
+  .edge:hover .line { stroke: #5a5f6b; }
+  .edge.cut:hover .line { stroke: var(--red); opacity: 1; }
+  .edge .cut-mark { display: none; pointer-events: none; }
+  .edge.cut .cut-mark { display: block; }
+  .cut-mark circle { fill: var(--bg); stroke: var(--red); stroke-width: 1.5; }
+  .cut-mark text { fill: var(--red); font-size: 11px; font-weight: 700; text-anchor: middle; }
+
+  /* Nodes */
+  .node { cursor: pointer; }
+  .node .body { fill: var(--panel-2); stroke: #6b6f78; stroke-width: 2; transition: fill 0.25s, stroke 0.25s; }
+  .node .id { fill: var(--text); font-size: 15px; font-weight: 700; text-anchor: middle; pointer-events: none; }
+  .node .role { fill: var(--muted); font-size: 12px; font-weight: 600; text-anchor: middle; pointer-events: none; }
+  .node .halo { fill: none; stroke: var(--blue); stroke-width: 2; opacity: 0; }
+  .node:hover .body { stroke: #a3a7b0; }
+
+  .node.leader .body { fill: var(--blue); stroke: #9aaeff; }
+  .node.leader .role { fill: #9aaeff; }
+  .node.leader .halo { animation: pulse 1.8s ease-out infinite; }
+
+  .node.leader.stale .body { fill: rgba(91, 124, 250, 0.12); stroke: var(--blue); stroke-dasharray: 4 3; }
+  .node.leader.stale .halo { animation: none; }
+  .node.leader.stale .role { fill: var(--amber); }
+
+  .node.candidate .body { stroke: var(--amber); stroke-dasharray: 5 4; animation: spin 1.2s linear infinite; }
+  .node.candidate .role { fill: var(--amber); }
+
+  .node.stopped { opacity: 0.45; }
+  .node.stopped .body { fill: transparent; stroke: var(--red); stroke-dasharray: 3 5; }
+  .node.stopped .role { fill: var(--red); }
+
+  @keyframes pulse {
+    0% { opacity: 0.7; r: 36; }
+    100% { opacity: 0; r: 56; }
+  }
+  @keyframes spin { to { stroke-dashoffset: -36; } }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; color: var(--muted); font-size: 13px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .hint { color: var(--dim); font-size: 12.5px; margin-top: 8px; }
+
+  /* Logs */
+  .log-grid { display: grid; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+  .log-row { display: flex; align-items: center; gap: 5px; }
+  .log-label { width: 52px; flex: none; font-weight: 600; font-size: 13px; }
+  .log-label.stopped { color: var(--red); opacity: 0.6; }
+  .slot {
+    width: 58px; height: 28px; flex: none;
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 600;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    padding: 0 4px;
+    border: 1.5px solid transparent;
+  }
+  .slot.empty { border: 1px dashed #2a2c31; }
+  .slot.saved { background: var(--green); color: #0b2a1d; }
+  .slot.waiting { border-color: var(--amber); color: var(--amber); }
+  .slot.delete.saved { background: #2f6b52; color: #d6f5e7; }
+  .log-key { display: flex; gap: 16px; color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+  .log-key span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 14px; height: 10px; border-radius: 3px; display: inline-block; }
+
+  /* Controls */
+  .row { display: flex; gap: 8px; margin-bottom: 8px; }
+  input[type=text] {
+    flex: 1; min-width: 0;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 10px; font: inherit;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--blue); }
+  button {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 12px; font: inherit; font-weight: 500; cursor: pointer;
+  }
+  button:hover { border-color: #4a4e57; }
+  button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  button.danger { color: var(--red); }
+  button:disabled { opacity: 0.5; cursor: wait; }
+  .buttons { display: flex; flex-wrap: wrap; gap: 8px; }
+  .buttons.stack { flex-direction: column; }
+  .buttons.stack button { text-align: left; }
+  .buttons.stack button small { display: block; color: var(--muted); font-weight: 400; font-size: 12px; }
+  .status { min-height: 20px; font-size: 13px; color: var(--muted); margin-top: 8px; }
+  .status.ok { color: var(--green); }
+  .status.err { color: var(--red); }
+
+  details { margin-top: 12px; color: var(--muted); font-size: 13px; }
+  summary { cursor: pointer; }
+  .setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 10px; }
+  input[type=range] { flex: 1; accent-color: var(--blue); }
+  .setting output { width: 52px; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+
+  /* Stores */
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 5px 6px; text-align: left; border-bottom: 1px solid #222428; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 80px; }
+  th { color: var(--muted); font-weight: 600; }
+  td.missing { color: var(--dim); }
+  td.stale { color: var(--amber); }
+  td.down { opacity: 0.4; }
+  .empty-note { color: var(--muted); font-size: 13px; }
+
+  /* Event feed */
+  #events { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; font-size: 13px; }
+  #events li { padding: 6px 0; border-bottom: 1px solid #202226; display: flex; gap: 10px; }
+  #events time { color: var(--dim); flex: none; font-variant-numeric: tabular-nums; }
+  #events .leader { color: #9aaeff; }
+  #events .candidate { color: var(--amber); }
+  #events .down { color: var(--red); }
+  #events .up, #events .commit { color: var(--green); }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="column">
+    <section class="card">
+      <h1>Distributed Key-Value Store</h1>
+      <div class="subtitle">5 servers keep the same data in sync using the Raft algorithm. One server is the leader; the others copy it.</div>
+
+      <div class="narration" id="narration">Connecting…</div>
+
+      <svg id="cluster" viewBox="0 0 640 540" role="img" aria-label="Raft cluster">
+        <defs>
+          <filter id="glow" x="-100%" y="-100%" width="300%" height="300%">
+            <feGaussianBlur stdDeviation="3" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+        <g id="edges"></g>
+        <g id="packets"></g>
+        <g id="nodes"></g>
+      </svg>
+
+      <div class="legend">
+        <span><i class="dot" style="background:#9aa0aa"></i>"I'm still the leader" (heartbeat)</span>
+        <span><i class="dot" style="background:var(--blue)"></i>New data being copied</span>
+        <span><i class="dot" style="background:var(--amber)"></i>"Vote for me"</span>
+        <span><i class="dot" style="background:var(--green)"></i>"Got it" / "Yes"</span>
+        <span><i class="dot" style="background:var(--red)"></i>Lost or refused</span>
+      </div>
+      <div class="hint">Tip: click a server to crash or restart it, or click a line between two servers to disconnect them.</div>
+    </section>
+
+    <section class="card">
+      <h2>Each server's copy of the history</h2>
+      <p class="explain">Every write is added to a list. A write is only saved for good once most servers (3 of 5) have it.</p>
+      <div class="log-grid" id="logs"></div>
+      <div class="log-key">
+        <span><i class="swatch" style="background:var(--green)"></i>Saved</span>
+        <span><i class="swatch" style="border:1.5px solid var(--amber)"></i>Waiting for a majority</span>
+      </div>
+    </section>
+  </div>
+
+  <div class="column">
+    <section class="card">
+      <h2>1. Save some data</h2>
+      <p class="explain">Your write goes to the leader, which copies it to the others.</p>
+      <div class="row">
+        <input type="text" id="key" placeholder="key" value="city" autocomplete="off" aria-label="Key">
+        <input type="text" id="value" placeholder="value" value="Toronto" autocomplete="off" aria-label="Value">
+      </div>
+      <div class="buttons">
+        <button class="primary" id="btn-put">Save</button>
+        <button id="btn-burst">Save 5 random values</button>
+      </div>
+      <div class="status" id="client-status"></div>
+    </section>
+
+    <section class="card">
+      <h2>2. Break something</h2>
+      <p class="explain">See how the servers recover on their own.</p>
+      <div class="buttons stack">
+        <button class="danger" id="btn-stop-leader">Crash the leader<small>The others notice and elect a new one</small></button>
+        <button class="danger" id="btn-isolate-leader">Disconnect the leader<small>It thinks it's still in charge, but can't save anything</small></button>
+        <button id="btn-heal">Fix everything<small>Restart servers and reconnect them</small></button>
+      </div>
+      <div class="status" id="fault-status"></div>
+
+      <details>
+        <summary>More options</summary>
+        <div class="setting">
+          <span>Network delay</span>
+          <input type="range" id="delay" min="0" max="200" step="10" value="0" aria-label="Network delay">
+          <output id="delay-out">0 ms</output>
+        </div>
+        <div class="setting">
+          <label for="show-heartbeats">Show heartbeats</label>
+          <input type="checkbox" id="show-heartbeats" checked>
+        </div>
+      </details>
+    </section>
+
+    <section class="card">
+      <h2>What each server has stored</h2>
+      <div id="stores"></div>
+    </section>
+
+    <section class="card">
+      <h2>What just happened</h2>
+      <ul id="events"></ul>
+    </section>
+  </div>
+</div>
+
+<script>
+const SVG_NS = "http://www.w3.org/2000/svg";
+const NODE_RADIUS = 34;
+const BASE_TRAVEL_MS = 450;   // how long a message takes to cross the screen (plus any added delay)
+const LOG_WINDOW = 8;         // how many writes to show in the history
+const MAX_PACKETS = 300;
+
+const $ = (selector) => document.querySelector(selector);
+
+let snapshot = null;
+let positions = {};
+let nodeElements = {};
+let edgeElements = {};
+let showHeartbeats = true;
+let pendingWrite = null;      // the write we're waiting on, for the narration
+let lastSaved = null;         // { text, at } of the most recent saved write
+const packets = [];
+const requestArrivals = new Map(); // message id → time its request animation finishes
+
+// ---------- Live stream ----------
+
+function connect() {
+  const events = new EventSource("/api/events");
+  events.onerror = () => setNarration("Lost connection to the visualizer. Is it still running?", "bad");
+  events.onmessage = (message) => {
+    const data = JSON.parse(message.data);
+    if (data.type === "snapshot") onSnapshot(data);
+    else if (data.type === "rpc") onMessage(data);
+  };
+}
+
+// ---------- Cluster drawing ----------
+
+function svg(tag, attributes, parent) {
+  const element = document.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
+  if (parent) parent.appendChild(element);
+  return element;
+}
+
+function buildCluster(nodes) {
+  const ids = nodes.map((n) => n.id);
+  const centerX = 320, centerY = 280, radius = ids.length === 1 ? 0 : 200;
+
+  ids.forEach((id, i) => {
+    const angle = -Math.PI / 2 + (i * 2 * Math.PI) / ids.length;
+    positions[id] = { x: centerX + radius * Math.cos(angle), y: centerY + radius * Math.sin(angle) };
+  });
+
+  const edgeLayer = $("#edges");
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      const a = ids[i], b = ids[j];
+      const p = positions[a], q = positions[b];
+      const group = svg("g", { class: "edge" }, edgeLayer);
+      svg("line", { class: "line", x1: p.x, y1: p.y, x2: q.x, y2: q.y }, group);
+      svg("line", { class: "hit", x1: p.x, y1: p.y, x2: q.x, y2: q.y }, group);
+      const mark = svg("g", { class: "cut-mark", transform: `translate(${(p.x + q.x) / 2},${(p.y + q.y) / 2})` }, group);
+      svg("circle", { r: 9 }, mark);
+      svg("text", { y: 4 }, mark).textContent = "✕";
+      group.addEventListener("click", () => toggleLink(a, b));
+      edgeElements[edgeKey(a, b)] = group;
+    }
+  }
+
+  const nodeLayer = $("#nodes");
+  for (const id of ids) {
+    const { x, y } = positions[id];
+    const group = svg("g", { class: "node follower", transform: `translate(${x},${y})` }, nodeLayer);
+    svg("circle", { class: "halo", r: 36 }, group);
+    svg("circle", { class: "body", r: NODE_RADIUS }, group);
+    svg("text", { class: "id", y: 5 }, group).textContent = id;
+    // Labels go below the bottom nodes and above the rest, so they never overlap the links.
+    const role = svg("text", { class: "role", y: y > centerY ? 54 : -46 }, group);
+    group.addEventListener("click", () => toggleNode(id));
+    nodeElements[id] = { group, role };
+  }
+}
+
+function edgeKey(a, b) {
+  return a < b ? `${a}|${b}` : `${b}|${a}`;
+}
+
+// ---------- Snapshots (state of every server, 10x per second) ----------
+
+function onSnapshot(data) {
+  if (!snapshot) buildCluster(data.nodes);
+  const previous = snapshot;
+  snapshot = data;
+
+  if (previous) describeChanges(previous, snapshot);
+
+  renderCluster();
+  renderLogs();
+  renderStores();
+  renderNarration();
+}
+
+function currentLeader(data) {
+  // During a disconnect an old leader may not know it's been replaced, so pick the newest term.
+  const leaders = data.nodes.filter((n) => n.alive && n.state === "leader");
+  leaders.sort((a, b) => b.term - a.term);
+  return leaders[0] || null;
+}
+
+function staleLeaders(data) {
+  const leader = currentLeader(data);
+  return data.nodes.filter((n) => n.alive && n.state === "leader" && leader && n.id !== leader.id);
+}
+
+function majority() {
+  return Math.floor(snapshot.nodes.length / 2) + 1;
+}
+
+function renderCluster() {
+  const leader = currentLeader(snapshot);
+  const cut = new Set(snapshot.links.filter((l) => l.cut).map((l) => edgeKey(l.from, l.to)));
+  const alive = new Set(snapshot.nodes.filter((n) => n.alive).map((n) => n.id));
+
+  for (const n of snapshot.nodes) {
+    const element = nodeElements[n.id];
+    if (!element) continue;
+
+    const stale = leader && n.state === "leader" && n.id !== leader.id;
+    element.group.setAttribute("class", `node ${n.state}${stale ? " stale" : ""}`);
+
+    const labels = { leader: "LEADER", candidate: "ASKING FOR VOTES", stopped: "CRASHED", follower: "" };
+    element.role.textContent = stale ? "THINKS IT'S LEADER" : labels[n.state] ?? "";
+  }
+
+  for (const [key, group] of Object.entries(edgeElements)) {
+    const [a, b] = key.split("|");
+    const isCut = cut.has(key);
+    const active = leader && (a === leader.id || b === leader.id) && alive.has(a) && alive.has(b) && !isCut;
+    group.setAttribute("class", "edge" + (isCut ? " cut" : active ? " active" : ""));
+  }
+}
+
+// The history view hides the leader's internal "no-op" entries and only shows real writes.
+function renderLogs() {
+  const writeIndexes = new Set();
+  for (const n of snapshot.nodes) {
+    for (const e of n.log) if (e.op !== "NOOP" && e.index <= n.log_length) writeIndexes.add(e.index);
+  }
+
+  const columns = [...writeIndexes].sort((a, b) => a - b).slice(-LOG_WINDOW);
+
+  if (columns.length === 0) {
+    $("#logs").innerHTML = `<div class="empty-note">Nothing saved yet. Try saving a value.</div>`;
+    return;
+  }
+
+  let html = "";
+  for (const n of snapshot.nodes) {
+    const entries = new Map(n.log.map((e) => [e.index, e]));
+    html += `<div class="log-row"><div class="log-label ${n.alive ? "" : "stopped"}">${escapeHTML(n.id)}</div>`;
+
+    for (const index of columns) {
+      const entry = entries.get(index);
+      if (!entry || index > n.log_length || entry.op === "NOOP") {
+        html += `<div class="slot empty"></div>`;
+        continue;
+      }
+
+      const saved = index <= n.commit_index;
+      const label = entry.op === "DELETE" ? `✕ ${entry.key}` : entry.key;
+      const title = `${describeEntry(entry)} · ${saved ? "saved" : "waiting for a majority"}`;
+      html += `<div class="slot ${saved ? "saved" : "waiting"} ${entry.op === "DELETE" ? "delete" : ""}" title="${escapeHTML(title)}">${escapeHTML(label)}</div>`;
+    }
+
+    html += `</div>`;
+  }
+
+  $("#logs").innerHTML = html;
+}
+
+function renderStores() {
+  const leader = currentLeader(snapshot);
+  const keys = new Set();
+  for (const n of snapshot.nodes) Object.keys(n.store).forEach((k) => keys.add(k));
+
+  if (keys.size === 0) {
+    $("#stores").innerHTML = `<div class="empty-note">Empty for now.</div>`;
+    return;
+  }
+
+  let html = `<table><thead><tr><th>Key</th>`;
+  for (const n of snapshot.nodes) html += `<th>${escapeHTML(n.id)}</th>`;
+  html += `</tr></thead><tbody>`;
+
+  for (const key of [...keys].sort()) {
+    html += `<tr><td>${escapeHTML(key)}</td>`;
+    for (const n of snapshot.nodes) {
+      const value = n.store[key];
+      const expected = leader ? leader.store[key] : undefined;
+      let cls = value === undefined ? "missing" : "";
+      if (leader && value !== undefined && value !== expected) cls = "stale";
+      if (!n.alive) cls += " down";
+      html += `<td class="${cls}" title="${escapeHTML(value ?? "")}">${value === undefined ? "—" : escapeHTML(value)}</td>`;
+    }
+    html += `</tr>`;
+  }
+
+  $("#stores").innerHTML = html + `</tbody></table>`;
+}
+
+// ---------- Narration: one plain-English sentence about what's happening now ----------
+
+function setNarration(text, kind) {
+  const element = $("#narration");
+  if (element.textContent !== text) element.textContent = text;
+  element.className = "narration " + (kind || "");
+}
+
+function renderNarration() {
+  const leader = currentLeader(snapshot);
+  const total = snapshot.nodes.length;
+  const up = snapshot.nodes.filter((n) => n.alive);
+  const crashed = snapshot.nodes.filter((n) => !n.alive).map((n) => n.id);
+  const stale = staleLeaders(snapshot);
+  const needed = majority();
+
+  if (up.length < needed) {
+    return setNarration(
+      `Only ${up.length} of ${total} servers are running. Raft needs a majority (${needed}) to agree on anything, so nothing can be saved until more come back.`,
+      "bad");
+  }
+
+  if (!leader) {
+    return setNarration(
+      "There's no leader right now. A server that stops hearing heartbeats asks the others to vote for it. The first one to get a majority of votes becomes the new leader.",
+      "warn");
+  }
+
+  if (pendingWrite) {
+    return setNarration(
+      `Saving "${pendingWrite.key} = ${pendingWrite.value}". The leader ${leader.id} is sending it to the other servers (blue dots). It counts as saved once ${needed} of ${total} servers have it.`,
+      "");
+  }
+
+  if (stale.length > 0) {
+    const old = stale.map((n) => n.id).join(", ");
+    return setNarration(
+      `${old} is cut off. It still thinks it's the leader, but it can't reach a majority, so nothing it accepts gets saved. The other servers elected ${leader.id} instead.`,
+      "warn");
+  }
+
+  if (lastSaved && performance.now() - lastSaved.at < 4000) {
+    return setNarration(`Saved! ${lastSaved.text} is now on a majority of servers, so it won't be lost even if the leader crashes.`, "good");
+  }
+
+  if (crashed.length > 0) {
+    return setNarration(
+      `${crashed.join(", ")} ${crashed.length === 1 ? "has" : "have"} crashed, but ${up.length} of ${total} servers is still a majority, so ${leader.id} keeps working. A restarted server catches up automatically.`,
+      "warn");
+  }
+
+  return setNarration(
+    `${leader.id} is the leader. Several times a second it tells every other server "I'm still here" (gray dots). If those stop, the others hold an election.`,
+    "");
+}
+
+// Turn the difference between two snapshots into readable events.
+function describeChanges(before, after) {
+  const old = new Map(before.nodes.map((n) => [n.id, n]));
+
+  for (const n of after.nodes) {
+    const p = old.get(n.id);
+    if (!p) continue;
+
+    if (p.alive && !n.alive) addEvent(`${n.id} crashed`, "down");
+    if (!p.alive && n.alive) addEvent(`${n.id} restarted and is catching up`, "up");
+    if (!n.alive) continue;
+
+    if (n.state === "candidate" && (p.state !== "candidate" || p.term !== n.term)) {
+      addEvent(`${n.id} stopped hearing from the leader and asked for votes`, "candidate");
+    }
+    if (n.state === "leader" && p.state !== "leader") {
+      addEvent(`${n.id} got a majority of votes and is the new leader`, "leader");
+    }
+    if (p.state === "leader" && n.state === "follower") {
+      addEvent(`${n.id} found out there's a newer leader and stepped down`, "candidate");
+    }
+  }
+
+  const leaderNow = currentLeader(after);
+  if (!leaderNow) return;
+
+  const leaderBefore = old.get(leaderNow.id);
+  if (!leaderBefore || leaderBefore.state !== "leader") return;
+
+  const entries = new Map(leaderNow.log.map((e) => [e.index, e]));
+  for (let i = leaderBefore.commit_index + 1; i <= leaderNow.commit_index; i++) {
+    const entry = entries.get(i);
+    if (entry && entry.op !== "NOOP") {
+      const text = describeEntry(entry);
+      addEvent(`Saved ${text} on a majority`, "commit");
+      lastSaved = { text, at: performance.now() };
+    }
+  }
+}
+
+function describeEntry(entry) {
+  if (entry.op === "PUT") return `"${entry.key} = ${entry.value}"`;
+  if (entry.op === "DELETE") return `delete "${entry.key}"`;
+  return "internal entry";
+}
+
+function addEvent(text, kind) {
+  const list = $("#events");
+  const item = document.createElement("li");
+  const time = document.createElement("time");
+  time.textContent = new Date().toLocaleTimeString([], { hour12: false });
+  const span = document.createElement("span");
+  span.className = kind || "";
+  span.textContent = text;
+  item.append(time, span);
+  list.prepend(item);
+  while (list.children.length > 60) list.lastChild.remove();
+}
+
+// ---------- Messages (animated dots) ----------
+
+function onMessage(event) {
+  if (event.kind === "heartbeat" && !showHeartbeats) return;
+  if (document.hidden) return; // animations pause in background tabs, so don't pile dots up
+  if (!positions[event.from] || !positions[event.to]) return;
+
+  const now = performance.now();
+  const travel = BASE_TRAVEL_MS + event.delay_ms;
+
+  if (event.phase === "request" || event.phase === "drop") {
+    addPacket(event, event.from, event.to, now, travel);
+    requestArrivals.set(event.id, now + travel);
+  } else {
+    // A reply can arrive before its request has finished animating, so start it once the request lands.
+    const start = Math.max(now, requestArrivals.get(event.id) || now);
+    requestArrivals.delete(event.id);
+    addPacket(event, event.to, event.from, start, travel);
+  }
+
+  if (requestArrivals.size > 1000) requestArrivals.clear();
+}
+
+function packetStyle(event) {
+  if (event.phase !== "response") {
+    if (event.kind === "heartbeat") return { r: 3.5, fill: "#9aa0aa", opacity: 0.7 };
+    if (event.kind === "vote") return { r: 6, fill: "#f5a524", glow: true };
+    return { r: 7, fill: "#5b7cfa", glow: true };
+  }
+
+  if (event.kind === "heartbeat") return event.ok ? { r: 2.5, fill: "#6b7079", opacity: 0.5 } : { r: 4, fill: "#f2555a" };
+  return event.ok ? { r: 5, fill: "#3ecf8e", glow: true } : { r: 4.5, fill: "#f2555a" };
+}
+
+function addPacket(event, from, to, start, duration) {
+  const a = positions[from], b = positions[to];
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const length = Math.hypot(dx, dy) || 1;
+  const ux = dx / length, uy = dy / length;
+  const style = packetStyle(event);
+
+  const element = svg("circle", { r: style.r, fill: style.fill, opacity: 0 }, $("#packets"));
+  if (style.glow) element.setAttribute("filter", "url(#glow)");
+
+  packets.push({
+    element, start, duration,
+    x1: a.x + ux * NODE_RADIUS, y1: a.y + uy * NODE_RADIUS,
+    x2: b.x - ux * NODE_RADIUS, y2: b.y - uy * NODE_RADIUS,
+    opacity: style.opacity ?? 1,
+    r: style.r,
+    dropped: event.phase === "drop",
+  });
+
+  while (packets.length > MAX_PACKETS) packets.shift().element.remove();
+}
+
+function ease(t) {
+  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+}
+
+function animate(now) {
+  for (let i = packets.length - 1; i >= 0; i--) {
+    const p = packets[i];
+    const t = (now - p.start) / p.duration;
+
+    if (t < 0) continue;
+    if (t >= 1) {
+      p.element.remove();
+      packets.splice(i, 1);
+      continue;
+    }
+
+    // Lost messages stop halfway along the line and fade out in red.
+    const stopAt = 0.5;
+    const progress = p.dropped ? ease(Math.min(t / stopAt, 1)) * stopAt : ease(t);
+    p.element.setAttribute("cx", p.x1 + (p.x2 - p.x1) * progress);
+    p.element.setAttribute("cy", p.y1 + (p.y2 - p.y1) * progress);
+
+    let opacity = p.opacity * Math.min(1, t / 0.08);
+    if (p.dropped && t > stopAt) {
+      const fade = (t - stopAt) / (1 - stopAt);
+      opacity = p.opacity * (1 - fade);
+      p.element.setAttribute("fill", "#f2555a");
+      p.element.setAttribute("r", p.r * (1 + fade));
+    }
+    p.element.setAttribute("opacity", opacity);
+  }
+
+  requestAnimationFrame(animate);
+}
+
+// ---------- Actions ----------
+
+async function post(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.error) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+function setStatus(selector, text, kind) {
+  const element = $(selector);
+  element.textContent = text;
+  element.className = "status " + (kind || "");
+}
+
+async function save(key, value) {
+  pendingWrite = { key, value };
+  try {
+    await post("/api/put", { key, value });
+  } finally {
+    pendingWrite = null;
+  }
+}
+
+async function runClient(action) {
+  const buttons = document.querySelectorAll("#btn-put, #btn-burst");
+  buttons.forEach((b) => (b.disabled = true));
+  try {
+    await action();
+  } catch (error) {
+    setStatus("#client-status", "Couldn't save: " + error.message, "err");
+  } finally {
+    buttons.forEach((b) => (b.disabled = false));
+  }
+}
+
+$("#btn-put").onclick = () => runClient(async () => {
+  const key = $("#key").value.trim(), value = $("#value").value;
+  if (!key) return setStatus("#client-status", "Enter a key first.", "err");
+  setStatus("#client-status", "Saving…");
+  await save(key, value);
+  setStatus("#client-status", `Saved "${key} = ${value}"`, "ok");
+});
+
+$("#btn-burst").onclick = () => runClient(async () => {
+  const words = ["apple", "river", "comet", "maple", "orbit", "cedar", "lunar", "pixel", "ember", "delta"];
+  for (let i = 0; i < 5; i++) {
+    const key = words[Math.floor(Math.random() * words.length)];
+    const value = String(Math.floor(Math.random() * 1000));
+    setStatus("#client-status", `Saving ${i + 1} of 5…`);
+    await save(key, value);
+  }
+  setStatus("#client-status", "Saved 5 values", "ok");
+});
+
+async function fault(action, message, kind) {
+  try {
+    await action();
+    if (message) addEvent(message, kind || "down");
+    setStatus("#fault-status", "");
+  } catch (error) {
+    setStatus("#fault-status", "Error: " + error.message, "err");
+  }
+}
+
+function toggleNode(id) {
+  const n = snapshot && snapshot.nodes.find((x) => x.id === id);
+  if (!n) return;
+  fault(() => post("/api/node", { id, action: n.alive ? "stop" : "start" }));
+}
+
+function toggleLink(a, b) {
+  const isCut = snapshot && snapshot.links.some((l) => l.cut && edgeKey(l.from, l.to) === edgeKey(a, b));
+  fault(() => post("/api/link", { a, b, cut: !isCut }),
+    isCut ? `Reconnected ${a} and ${b}` : `Disconnected ${a} from ${b}`, isCut ? "up" : "down");
+}
+
+$("#btn-stop-leader").onclick = () => {
+  const leader = snapshot && currentLeader(snapshot);
+  if (!leader) return setStatus("#fault-status", "There's no leader right now. Wait for the election to finish.", "err");
+  fault(() => post("/api/node", { id: leader.id, action: "stop" }));
+};
+
+$("#btn-isolate-leader").onclick = () => {
+  const leader = snapshot && currentLeader(snapshot);
+  if (!leader) return setStatus("#fault-status", "There's no leader right now. Wait for the election to finish.", "err");
+  const others = snapshot.nodes.filter((n) => n.id !== leader.id);
+  fault(async () => {
+    for (const n of others) await post("/api/link", { a: leader.id, b: n.id, cut: true });
+  }, `Disconnected ${leader.id} from everyone else`);
+};
+
+$("#btn-heal").onclick = () => fault(() => post("/api/heal"), "Fixed: every server is running and connected", "up");
+
+let delayTimer = null;
+$("#delay").oninput = (e) => {
+  const ms = Number(e.target.value);
+  $("#delay-out").textContent = `${ms} ms`;
+  clearTimeout(delayTimer);
+  delayTimer = setTimeout(() => fault(() => post("/api/delay", { ms })), 150);
+};
+
+$("#show-heartbeats").onchange = (e) => (showHeartbeats = e.target.checked);
+
+function escapeHTML(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+connect();
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
